@@ -1,0 +1,493 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform:
+- AWS::Serverless-2016-10-31
+Description: Cognito Stack
+Parameters:
+
+  clientId:
+    Type: String
+  clientSecret:
+    Type: String
+  poolDomain:
+    Type: String
+  callbackUrl:
+    Type: String
+  logoutUrl:
+    Type: String
+  debug:
+    Type: String
+    Default: "true"
+
+Globals:
+  Function:
+    Handler: index.handler
+    Runtime: nodejs12.x
+    
+Resources:
+
+  CognitoUserPool:
+    Type: "AWS::Cognito::UserPool"
+    Properties:
+      UserPoolName: 
+          Fn::Sub: ${AWS::StackName}-user-pool
+      LambdaConfig:
+        PostConfirmation:
+          Fn::GetAtt: [PostConfirmationTrigger, Arn]
+
+  PostConfirmationTrigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./lambda/postConfirmationTrigger
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          DEBUG:
+            Ref: debug
+          TABLE_EMPLOYEE:
+            Ref: EmployeeTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "dynamodb:PutItem"
+              Resource:
+                Fn::GetAtt: EmployeeTable.Arn
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminAddUserToGroup
+              Resource: "*"
+
+  PostConfirmationTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt: [PostConfirmationTrigger, Arn]
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPool}
+
+  CognitoUserPoolIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties: 
+      ProviderName: Google
+      AttributeMapping:
+        email: email
+        picture: picture
+        name: name
+      ProviderDetails:
+        client_id:
+          Ref: clientId
+        client_secret: 
+          Ref: clientSecret
+        authorize_scopes: email openid profile
+      ProviderType: Google
+      UserPoolId: 
+        Ref: CognitoUserPool
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: 
+          Fn::Sub: ${AWS::StackName}-user-pool-client
+      UserPoolId:
+        Ref: CognitoUserPool
+      GenerateSecret: false
+      SupportedIdentityProviders: 
+        - Google
+      CallbackURLs: 
+        - 
+          Ref: callbackUrl
+      LogoutURLs:
+        - 
+          Ref: logoutUrl      
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes: 
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      AllowedOAuthFlowsUserPoolClient: true
+  
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      Domain:
+        Ref: poolDomain
+      UserPoolId: 
+        Ref: CognitoUserPool
+
+  CognitoIdentityPool:
+      Type: AWS::Cognito::IdentityPool
+      Properties:
+        IdentityPoolName:
+          Fn::Sub: ${AWS::StackName}-identity-pool
+        AllowUnauthenticatedIdentities: false
+        CognitoIdentityProviders:
+          - ClientId:
+              Ref: CognitoUserPoolClient
+            ProviderName:
+              Fn::GetAtt: [CognitoUserPool, ProviderName]
+
+  CognitoUnAuthorizedRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: ${AWS::StackName}-Cognito_UnAuthorized_Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud":
+                  Ref: CognitoIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+      Policies:
+        - PolicyName:
+            Fn::Sub: ${AWS::StackName}-unauthorized-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                Resource: "*"
+  CognitoAuthorizedRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: ${AWS::StackName}-Cognito_Authorized_Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud":
+                  Ref: CognitoIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName:
+            Fn::Sub: ${AWS::StackName}-authorized-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                Resource: "*"
+
+  IdentityPoolRoleMapping:
+    Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+    Properties:
+      IdentityPoolId:
+        Ref: CognitoIdentityPool
+      Roles:
+        authenticated:
+          Fn::GetAtt: [CognitoAuthorizedRole, Arn]
+        unauthenticated:
+          Fn::GetAtt: [CognitoUnAuthorizedRole, Arn]
+          
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-graphqlapi
+      AuthenticationType: "AMAZON_COGNITO_USER_POOLS"
+      UserPoolConfig:
+        UserPoolId:
+          Ref: CognitoUserPool
+        AwsRegion:
+          Ref: AWS::Region
+        DefaultAction: "ALLOW"
+        
+  Schema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: 
+        Fn::GetAtt: GraphQLApi.ApiId
+      Definition: |
+        type Certification {
+          id: ID!
+          img: String
+          url: String
+          order: Int
+          description: String
+        }
+
+        type Employee {
+          email: ID!
+          firstName: String
+          secondName: String
+          lastName: String
+          position: String
+          telephone: String
+          linkedin: String
+          Certifications: [Certification]
+        }
+
+        input EmployeeInput {
+          email: ID!
+          firstName: String
+          secondName: String
+          lastName: String
+          position: String
+          telephone: String
+          linkedin: String
+          Certifications: [CertificationInput]
+        }
+
+        input CertificationInput {
+          id: ID!
+          img: String
+          url: String
+          order: Int
+          description: String
+        }
+
+        type Mutation {
+          createEmployee(input: EmployeeInput): Employee!
+          updateEmployee(input: EmployeeInput): Employee!
+        }
+
+        type Query {
+          allEmployees(nextToken: String): [Employee]
+          getEmployee(email: ID!): Employee
+        }
+
+        schema {
+          query: Query
+          mutation: Mutation
+        }
+  Employee:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId:
+        Fn::GetAtt: GraphQLApi.ApiId
+      Name: Employee
+      Description: The employee DynamoDB table
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn:
+        Fn::GetAtt: AppSyncRole.Arn
+      DynamoDBConfig:
+        AwsRegion:
+          Ref: "AWS::Region"
+        TableName:
+          Ref: EmployeeTable
+
+  AppSyncRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: ${AWS::StackName}-appsync
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "appsync.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        -
+          PolicyName: 
+            Fn::Sub: ${AWS::StackName}-appsync-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:DeleteItem"
+                  - "dynamodb:GetItem"
+                  - "dynamodb:Query"
+                  - "dynamodb:Scan"
+                Resource: "*"
+
+  createEmployeeResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: Schema
+    Properties:
+      ApiId:
+        Fn::GetAtt: GraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: createEmployee
+      DataSourceName:
+        Fn::GetAtt: Employee.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+              "email": $util.dynamodb.toDynamoDBJson($ctx.args.input.email),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args.input)
+        }
+      ResponseMappingTemplate: |
+        #if ( $ctx.error )
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  updateEmployeeResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: Schema
+    Properties:
+      ApiId:
+        Fn::GetAtt: GraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: updateEmployee
+      DataSourceName:
+        Fn::GetAtt: Employee.Name
+      RequestMappingTemplate: |
+        {
+            "version" : "2017-02-28",
+            "operation" : "UpdateItem",
+            "key" : {
+                "email" : { "S" : "${ctx.args.input.email}" }
+            },
+            ## Set up some space to keep track of things we're updating **
+            #set( $expNames  = {} )
+            #set( $expValues = {} )
+            #set( $expSet = {} )
+            #set( $expAdd = {} )
+            #set( $expRemove = [] )
+            ## Iterate through each argument, skipping "userId" and "signalId" **
+            #foreach( $entry in $util.map.copyAndRemoveAllKeys($ctx.args.input, ["email"]).entrySet() )
+                #if( $util.isNull($entry.value) )
+                    ## If the argument is set to "null", then remove that attribute from the item in DynamoDB **
+                    #set( $discard = ${expRemove.add("#${entry.key}")} )
+                    $!{expNames.put("#${entry.key}", "${entry.key}")}
+                #else
+                    ## Otherwise set (or update) the attribute on the item in DynamoDB **
+                    $!{expSet.put("#${entry.key}", ":${entry.key}")}
+                    $!{expNames.put("#${entry.key}", "${entry.key}")}
+                    $!{expValues.put(":${entry.key}", $util.dynamodb.toDynamoDB($entry.value))}
+                #end
+            #end
+            ## Start building the update expression, starting with attributes we're going to SET **
+            #set( $expression = "" )
+            #if( !${expSet.isEmpty()} )
+                #set( $expression = "SET" )
+                #foreach( $entry in $expSet.entrySet() )
+                    #set( $expression = "${expression} ${entry.key} = ${entry.value}" )
+                    #if ( $foreach.hasNext )
+                        #set( $expression = "${expression}," )
+                    #end
+                #end
+            #end
+            ## Continue building the update expression, adding attributes we're going to ADD **
+            #if( !${expAdd.isEmpty()} )
+                #set( $expression = "${expression} ADD" )
+                #foreach( $entry in $expAdd.entrySet() )
+                    #set( $expression = "${expression} ${entry.key} ${entry.value}" )
+                    #if ( $foreach.hasNext )
+                        #set( $expression = "${expression}," )
+                    #end
+                #end
+            #end
+            ## Continue building the update expression, adding attributes we're going to REMOVE **
+            #if( !${expRemove.isEmpty()} )
+                #set( $expression = "${expression} REMOVE" )
+                #foreach( $entry in $expRemove )
+                    #set( $expression = "${expression} ${entry}" )
+                    #if ( $foreach.hasNext )
+                        #set( $expression = "${expression}," )
+                    #end
+                #end
+            #end
+            ## Finally, write the update expression into the document, along with any expressionNames and expressionValues **
+            "update" : {
+                "expression" : "${expression}",
+                #if( !${expNames.isEmpty()} )
+                    "expressionNames" : $utils.toJson($expNames),
+                #end
+                #if( !${expValues.isEmpty()} )
+                    "expressionValues" : $utils.toJson($expValues),
+                #end
+            }
+          }
+      ResponseMappingTemplate: |
+        #if ( $ctx.error )
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  getEmployeeResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId:
+        Fn::GetAtt: GraphQLApi.ApiId
+      TypeName: Query
+      FieldName: getEmployee
+      DataSourceName:
+        Fn::GetAtt: Employee.Name
+      RequestMappingTemplate: | 
+        {
+            "version": "2017-02-28",
+            "operation": "GetItem",
+            "key": {
+                "email": $util.dynamodb.toDynamoDBJson($ctx.args.email),
+            }
+        }
+      ResponseMappingTemplate: |
+        #if ( $ctx.error )
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  allEmployeesResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: Schema
+    Properties:
+      ApiId:
+        Fn::GetAtt: GraphQLApi.ApiId
+      TypeName: Query
+      FieldName: allEmployees
+      DataSourceName:
+        Fn::GetAtt: Employee.Name
+      RequestMappingTemplate: | 
+        {
+            "version" : "2017-02-28",
+            "operation" : "Scan",
+            "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+            "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+        }
+      ResponseMappingTemplate: |
+        #if ( $ctx.error )
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  EmployeeTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName:
+        Fn::Sub: ${AWS::StackName}-employees
+      PrimaryKey:
+        Name: email
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
