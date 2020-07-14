@@ -69,6 +69,8 @@ Resources:
         Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPool}
 
   CognitoUserPoolIdentityProvider:
+    DependsOn: 
+      - CognitoUserPool
     Type: AWS::Cognito::UserPoolIdentityProvider
     Properties: 
       ProviderName: Google
@@ -87,6 +89,9 @@ Resources:
         Ref: CognitoUserPool
 
   CognitoUserPoolClient:
+    DependsOn: 
+      - CognitoUserPool
+      - CognitoUserPoolIdentityProvider
     Type: AWS::Cognito::UserPoolClient
     Properties:
       ClientName: 

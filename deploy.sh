@@ -15,19 +15,21 @@ POOL_DOMAIN="XXXXXX" #THE NAME OF THE DOMAIN FOR OUR POOL.
 CALLBACKURL='http://localhost:4200/auth' #CHANGE "localhost:4200" IF YOU ARE IN PRODUCTION. SET TE FINAL DOMAIN
 LOGOUTURL='http://localhost:4200/logout'#CHANGE "localhost:4200" IF YOU ARE IN PRODUCTION. SET TE FINAL DOMAIN
 
+AWS_PROFILE=XXXX
+
 echo "${YELLOW} Validating local SAM Template..."
 echo " ================================${NC}"
-sam validate --template "template.yaml"
+sam validate --profile $AWS_PROFILE --template "template.yaml"
 
 echo "${YELLOW} Building local SAM App..."
 echo " =========================${NC}"
-sam build -t "template.yaml"
+sam build --profile $AWS_PROFILE -t "template.yaml"
 
 echo "${YELLOW} Package"
 echo " ================================================= ${NC}"
-sam package --template-file ./template.yaml --output-template-file packaged-template.yaml --s3-bucket $BUCKET
+sam package --profile $AWS_PROFILE --template-file .aws-sam/build/template.yaml --output-template-file .aws-sam/build/packaged-template.yaml --s3-bucket $BUCKET
 
 echo "${YELLOW} Deploy"
 echo " ================================================= ${NC}"
-sam deploy --template-file packaged-template.yaml --stack-name $STACK --tags Project=$PROJECT --parameter-overrides clientId=$CLIENTID clientSecret=$CLIENT_SECRET poolDomain=$POOL_DOMAIN callbackUrl=$CALLBACKURL logoutUrl=$LOGOUTURL --capabilities CAPABILITY_NAMED_IAM
+sam deploy --profile $AWS_PROFILE --region --template-file .aws-sam/build/packaged-template.yaml --stack-name $STACK --tags Project=$PROJECT --parameter-overrides clientId=$CLIENTID clientSecret=$CLIENT_SECRET poolDomain=$POOL_DOMAIN callbackUrl=$CALLBACKURL logoutUrl=$LOGOUTURL --capabilities CAPABILITY_NAMED_IAM
 
